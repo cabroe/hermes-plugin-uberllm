@@ -1,6 +1,6 @@
 name: uberllm
-version: 1.0.0
-description: "UberLLM video generation backend (text-, image- and reference-to-video) for Hermes. Talks to /v1/video/generations, discovers the model catalog live from api.uberllm.dev, picks the modality-matching model id per call, inlines image inputs, and downloads artifacts with the API key."
+version: 1.1.0
+description: "UberLLM backends for Hermes: video generation (text-, image- and reference-to-video via /v1/video/generations) and image generation (text-to-image and editing via /v1/images/generations and /v1/images/edits, saved as b64_json). Both discover their model catalog live from api.uberllm.dev."
 author: cabroe
 kind: backend
 license: MIT
@@ -8,8 +8,10 @@ homepage: https://github.com/cabroe/hermes-plugin-uberllm
 tags:
   - video
   - video-generation
+  - image
+  - image-generation
   - uberllm
-  - image-to-video
   - text-to-video
+  - image-to-video
 requires_env:
   - HERMES_CUSTOM_API_UBERLLM_DEV_API_KEY

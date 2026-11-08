@@ -403,5 +403,11 @@ def _error_text(response: Any) -> str:
 
 
 def register(ctx) -> None:
-    """Plugin entry point — wire ``UberLLMVideoGenProvider`` into the registry."""
+    """Plugin entry point — wire the UberLLM video and image backends into the registries."""
     ctx.register_video_gen_provider(UberLLMVideoGenProvider())
+    try:
+        from .image_backend import UberLLMImageGenProvider
+    except Exception as exc:  # an image-side import error must not take video down with it
+        logger.warning("UberLLM image backend unavailable: %s", exc)
+    else:
+        ctx.register_image_gen_provider(UberLLMImageGenProvider())
