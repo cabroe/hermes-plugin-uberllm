@@ -51,7 +51,9 @@ Just ask Hermes for a video, or call the tool:
 - reference-to-video: several images as references
 
 `video_gen.model` is a **family** id. The backend strips the modality suffix and re-applies the one
-the call needs, so one configured family serves all three modalities.
+the call needs, so one configured family serves all three modalities. A directory-style family
+(`fal-ai/minimax/hailuo-02/standard`), a full id (`…/standard/text-to-video`) and an id that names its
+modality instead of suffixing it (`uncensored/uncensored-t2v-turbo`, `fal-ai/veo3.1`) all resolve.
 
 ### What it handles for you
 
@@ -61,6 +63,7 @@ the call needs, so one configured family serves all three modalities.
 | Images must be `https://` or `data:`; the provider fetches remote links itself and fails the job on hosts that block server-side requests | Downloads remote images and inlines them as `data:` URIs; local paths and `file://` are base64'd |
 | Async jobs (`POST` → `202 {id}` → poll) | Polls every 5 s up to 15 min, sends `Idempotency-Key`, downloads the artifact with `Authorization` |
 | Catalog mixes available and unavailable models | Filters `available: false` out of candidates |
+| `GET /v1/models?type=video` omits `parameters`; **unknown fields are dropped, not rejected** | Reads `GET /v1/models/<id>` per model (10 min cache) and sends only the parameters that model declares, with a value from its own enum. Values it cannot honour come back in `ignored_params` instead of looking applied |
 
 ## Image
 
@@ -85,6 +88,15 @@ to switch to.
 
 - **Duration is validated per model.** `fal-ai/minimax/hailuo-02/standard/*` makes 6 s or 10 s clips
   only; asking for 3 s returns HTTP 400 and the provider's text comes through verbatim.
+- **`resolution` is a per-model parameter, and it has to be sent explicitly.** Models that list it
+  (`uncensored/uncensored-t2v-turbo`: `480p`, `720p`) use the provider default when it is omitted;
+  models that do not list it ignore the field entirely (`fal-ai/minimax/hailuo-02/standard/*`). The
+  plugin now sends it whenever the model declares it, and reports the value it did **not** send in
+  `ignored_params` (`{"param": "resolution", "value": "1080p", "reason": "allowed: 480p, 720p"}`).
+- **`aspect_ratio` is not honoured by every model, and the output size is not a promise.**
+  `uncensored/uncensored-t2v-turbo` declares no `aspect_ratio` at all and returns 840×480 (1.75:1) for
+  a 16:9 request; 27 of the 100 available video models do declare it. Read `resolution` /
+  `ignored_params` in the tool result, and `ffprobe` the file, before assuming a frame size.
 - **Output follows the source image's aspect** for image-to-video, not `aspect_ratio`: a 4:3 photo
   returns 1024×768 even when 16:9 is requested. A 6 s request yields a 5.875 s file at 24 fps.
 - **Listed price is not what you pay.** `pricing.usd` in the catalog says $0.025/s for hailuo

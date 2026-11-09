@@ -104,6 +104,22 @@ def _family(model_id: str) -> str:
     return model_id
 
 
+def _configured_model() -> str:
+    """``video_gen.model`` as configured (the family/id the caller asked for)."""
+    try:
+        from hermes_cli.config import load_config
+
+        cfg = load_config()
+    except Exception:
+        return ""
+    video = cfg.get("video_gen") if isinstance(cfg, dict) else None
+    return str(video.get("model") or "").strip() if isinstance(video, dict) else ""
+
+
+def _enum_of(spec: Any) -> list[Any]:
+    return list(spec.get("enum") or []) if isinstance(spec, dict) else []
+
+
 class UberLLMVideoGenProvider(VideoGenProvider):
     """Text-, image- and reference-to-video through UberLLM's job API."""
 
@@ -112,6 +128,7 @@ class UberLLMVideoGenProvider(VideoGenProvider):
 
     def __init__(self) -> None:
         self._catalog_cache: Optional[tuple[list[dict[str, Any]], float]] = None
+        self._detail_cache: dict[str, tuple[Optional[dict[str, Any]], float]] = {}
 
     # ---- credentials / transport -------------------------------------------------------------
     def is_available(self) -> bool:
@@ -146,6 +163,50 @@ class UberLLMVideoGenProvider(VideoGenProvider):
             logger.debug("UberLLM video catalog unavailable: %s", exc)
         self._catalog_cache = (entries, time.monotonic())
         return entries
+
+    def _model_detail(self, model_id: str) -> Optional[dict[str, Any]]:
+        """The model's declared ``parameters.properties`` map, or ``None`` if unknown.
+
+        ``GET /v1/models?type=video`` omits ``parameters``; only the per-model detail
+        route lists them, so this is the single source of truth for what a model accepts.
+        ``{}`` means "the model declares no optional parameters"; ``None`` (network
+        failure) means "unknown — send the caller's values as they are".
+        """
+        if not model_id:
+            return None
+        cached = self._detail_cache.get(model_id)
+        if cached and time.monotonic() - cached[1] < _CATALOG_TTL_S:
+            return cached[0]
+        props: Optional[dict[str, Any]] = None
+        try:
+            import requests
+
+            response = requests.get(
+                f"{_base_url()}/models/{model_id}",
+                headers=self._headers(),
+                timeout=_REQUEST_TIMEOUT_S,
+            )
+            if response.status_code < 400:
+                data = response.json()
+                detail = data.get("data") if isinstance(data, dict) else None
+                detail = detail if isinstance(detail, dict) else (data if isinstance(data, dict) else {})
+                found = (detail.get("parameters") or {}).get("properties")
+                props = found if isinstance(found, dict) else {}
+        except Exception as exc:
+            logger.debug("UberLLM video: model detail for %s unavailable: %s", model_id, exc)
+        self._detail_cache[model_id] = (props, time.monotonic())
+        return props
+
+    def _configured_detail(self) -> Optional[dict[str, Any]]:
+        """Declared parameters of the id the configured family uses for a text call."""
+        family = _configured_model()
+        if not family:
+            return None
+        try:
+            model_id = self._resolve_model(family, image_url=None, references=[])
+        except ValueError:
+            return None
+        return self._model_detail(model_id)
 
     def list_models(self) -> List[Dict[str, Any]]:
         """One entry per model family, with the modalities its ids cover."""
@@ -185,7 +246,7 @@ class UberLLMVideoGenProvider(VideoGenProvider):
         return None
 
     def capabilities(self) -> dict[str, Any]:
-        return {
+        caps: dict[str, Any] = {
             "modalities": ["text", "image"],
             "aspect_ratios": ["16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3", "21:9"],
             "resolutions": ["480p", "720p", "1080p"],
@@ -197,6 +258,21 @@ class UberLLMVideoGenProvider(VideoGenProvider):
             "supports_upscale": False,
             "max_reference_images": 4,
         }
+        # The tool schema is built from this, so advertise what the configured model
+        # actually declares. Ground truth beats a shared list: ``uncensored-t2v-turbo``
+        # accepts 480p/720p and no ``aspect_ratio`` at all, and UberLLM silently drops
+        # fields a model does not know rather than rejecting them.
+        props = self._configured_detail() or {}
+        aspect_ratios, resolutions = _enum_of(props.get("aspect_ratio")), _enum_of(props.get("resolution"))
+        durations = _enum_of(props.get("duration_seconds"))
+        if aspect_ratios:
+            caps["aspect_ratios"] = [str(v) for v in aspect_ratios]
+        if resolutions:
+            caps["resolutions"] = [str(v) for v in resolutions]
+        numeric = [d for d in durations if isinstance(d, (int, float)) and not isinstance(d, bool)]
+        if numeric:
+            caps["min_duration"], caps["max_duration"] = int(min(numeric)), int(max(numeric))
+        return caps
 
     def get_setup_schema(self) -> Dict[str, Any]:
         return {
@@ -234,6 +310,12 @@ class UberLLMVideoGenProvider(VideoGenProvider):
             slash_form = head[0] + "/" + wanted.lstrip("-")
             if slash_form not in candidates:
                 candidates.append(slash_form)
+        elif str(configured or "").strip():
+            # A family directory without a modality segment — what the README tells you to
+            # configure: "fal-ai/minimax/hailuo-02/standard" → "…/standard/text-to-video".
+            dir_form = str(configured).strip().rstrip("/") + "/" + wanted.lstrip("-")
+            if dir_form not in candidates:
+                candidates.append(dir_form)
         for candidate in candidates:
             if candidate in available:
                 return candidate
@@ -241,6 +323,22 @@ class UberLLMVideoGenProvider(VideoGenProvider):
         # otherwise the request would run with the wrong modality (image dropped).
         if configured in available and str(configured).endswith(wanted):
             return str(configured)
+        # Some ids name their modality instead of suffixing it
+        # ("uncensored/uncensored-t2v-turbo", "kling/kling-3-0-turbo", "fal-ai/veo3.1").
+        # For those the family+suffix dance above has nothing to build, and rejecting the
+        # call made every such model unusable. Accept the configured id verbatim when it
+        # is available and its own schema covers this call: an image call needs a declared
+        # image input, a text call needs a known (non image-only) model.
+        if str(configured or "") in available:
+            detail = self._model_detail(str(configured))
+            if references:
+                fits = isinstance((detail or {}).get("input_images"), dict)
+            elif image_url:
+                fits = isinstance((detail or {}).get("image_url"), dict)
+            else:
+                fits = detail is not None
+            if fits:
+                return str(configured)
         raise ValueError(
             f"UberLLM has no available model for this call: tried {candidates!r}. "
             "Pick another family with `hermes config set video_gen.model <id>`."
@@ -285,10 +383,35 @@ class UberLLMVideoGenProvider(VideoGenProvider):
                                   aspect_ratio=aspect_ratio)
 
         payload: dict[str, Any] = {"model": model_id, "prompt": prompt}
-        if duration:
-            payload["duration_seconds"] = int(duration)
-        if aspect_ratio:
-            payload["aspect_ratio"] = aspect_ratio
+        declared = self._model_detail(model_id)
+        ignored: list[dict[str, Any]] = []
+        applied: dict[str, Any] = {}
+
+        def _send(key: str, value: Any) -> None:
+            """Send a parameter only when the model declares it and accepts the value.
+
+            UberLLM tolerates unknown fields and drops them without an error, so an
+            unsupported ``aspect_ratio`` used to look applied while the provider chose
+            the frame size itself (840×480 for a 16:9 request), and ``resolution`` was
+            never sent at all. Omitted values are reported in ``ignored_params``.
+            """
+            if value is None or value == "" or value == 0 or value is False:
+                return
+            spec = (declared or {}).get(key) if declared is not None else None
+            if declared is not None and not isinstance(spec, dict):
+                ignored.append({"param": key, "value": value, "reason": "not supported by this model"})
+                return
+            allowed = _enum_of(spec)
+            if allowed and value not in allowed:
+                ignored.append({"param": key, "value": value,
+                                "reason": "allowed: " + ", ".join(str(a) for a in allowed)})
+                return
+            payload[key] = value
+            applied[key] = value
+
+        _send("duration_seconds", int(duration) if duration else None)
+        _send("aspect_ratio", aspect_ratio)
+        _send("resolution", resolution)
         if references:
             payload["input_images"] = [{"url": u, "role": "reference"} for u in references]
         elif primary_image:
@@ -337,9 +460,12 @@ class UberLLMVideoGenProvider(VideoGenProvider):
             usage = finished.get("usage") or {}
             return success_response(
                 video=video, model=model_id, prompt=prompt, modality=modality,
-                aspect_ratio=aspect_ratio, duration=int(duration or 0), provider=self.name,
+                aspect_ratio=str(applied.get("aspect_ratio") or ""),
+                duration=int(applied.get("duration_seconds") or 0), provider=self.name,
                 extra={"job_id": job_id, "cost_usd": usage.get("cost_usd"),
-                       "estimated_cost_usd": finished.get("estimated_cost_usd")},
+                       "estimated_cost_usd": finished.get("estimated_cost_usd"),
+                       "resolution": str(applied.get("resolution") or "provider default"),
+                       "applied": applied, "ignored_params": ignored},
             )
         except Exception as exc:
             return error_response(error=f"UberLLM video request failed: {exc}", error_type="provider_error",
