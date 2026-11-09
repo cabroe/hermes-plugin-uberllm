@@ -1,5 +1,5 @@
 name: uberllm
-version: 1.2.0
+version: 1.2.1
 description: "UberLLM backends for Hermes: video generation (text-, image- and reference-to-video via /v1/video/generations) and image generation (text-to-image and editing via /v1/images/generations and /v1/images/edits, saved as b64_json). Both discover their model catalog live from api.uberllm.dev."
 author: cabroe
 kind: backend

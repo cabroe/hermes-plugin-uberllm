@@ -458,6 +458,18 @@ class UberLLMVideoGenProvider(VideoGenProvider):
                 logger.warning("UberLLM video download failed (%s); returning the artifact URL", exc)
                 video = url
             usage = finished.get("usage") or {}
+            # The charge lands a beat after status flips to succeeded: a real 480p job
+            # reported cost_usd=null (estimate 0.102) while the job detail answered
+            # usage.cost_usd=0.51 seconds later. The estimate is not the bill, so re-read
+            # the job a few times instead of reporting null.
+            for _ in range(3):
+                if usage.get("cost_usd") is not None:
+                    break
+                time.sleep(2)
+                try:
+                    usage = self._poll(session, job_id).get("usage") or usage
+                except Exception:
+                    break
             return success_response(
                 video=video, model=model_id, prompt=prompt, modality=modality,
                 aspect_ratio=str(applied.get("aspect_ratio") or ""),

@@ -97,6 +97,10 @@ to switch to.
   `uncensored/uncensored-t2v-turbo` declares no `aspect_ratio` at all and returns 840×480 (1.75:1) for
   a 16:9 request; 27 of the 100 available video models do declare it. Read `resolution` /
   `ignored_params` in the tool result, and `ffprobe` the file, before assuming a frame size.
+- **Measured 480p job** (`uncensored/uncensored-t2v-turbo`, 5 s prompt, 2026-11-09): 840×480, 30 fps,
+  161 frames, 5.37 s, 512 KB. Billed **$0.51** while `estimated_cost_usd` said $0.102 — the estimate
+  is off by 5× on this model, so read `cost_usd`. `usage` also lands a few seconds *after* the job
+  reports `succeeded`; the plugin re-reads the job up to 3× (2 s apart) instead of returning null.
 - **Output follows the source image's aspect** for image-to-video, not `aspect_ratio`: a 4:3 photo
   returns 1024×768 even when 16:9 is requested. A 6 s request yields a 5.875 s file at 24 fps.
 - **Listed price is not what you pay.** `pricing.usd` in the catalog says $0.025/s for hailuo
